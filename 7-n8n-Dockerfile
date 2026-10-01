@@ -1,0 +1,15 @@
+FROM docker.n8n.io/n8nio/n8n:latest
+USER root
+ENV N8N_PORT=7860 \
+    N8N_PROTOCOL=https \
+    N8N_PROXY_HOPS=1 \
+    GENERIC_TIMEZONE=Asia/Kolkata \
+    TZ=Asia/Kolkata \
+    N8N_RUNNERS_ENABLED=true \
+    DB_TYPE=postgresdb \
+    DB_POSTGRESDB_SSL_ENABLED=true \
+    DB_POSTGRESDB_SSL_REJECT_UNAUTHORIZED=false \
+    EXECUTIONS_DATA_PRUNE=true \
+    EXECUTIONS_DATA_MAX_AGE=72
+EXPOSE 7860
+USER node
