@@ -24,7 +24,7 @@ SYSTEM = (
 
 HISTORY = {}   # number -> list of {role, parts}
 MAX_TURNS = 20
-TASK_FILE = "tasks.json"  # note: Render free disk is wiped on restart/redeploy
+TASK_FILE = os.environ.get("TASK_FILE", "tasks.json")  # note: Render free disk is wiped on restart/redeploy
 LOCK = threading.Lock()
 SEEN = set()
 
@@ -131,6 +131,7 @@ def process(msg):
 
 
 @app.get("/")
+@app.get("/health")
 def health():
     return "ok"
 
