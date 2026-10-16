@@ -6,11 +6,13 @@ import threading
 import pytest
 
 import app as bot
+from store import FileStore
 
 
 @pytest.fixture(autouse=True)
 def clean(tmp_path, monkeypatch):
-    monkeypatch.setattr(bot, "TASK_FILE", str(tmp_path / "tasks.json"))
+    monkeypatch.setattr(bot, "STORE", FileStore(str(tmp_path / "data.json")))
+    monkeypatch.setattr(bot, "CRON_SECRET", "cron")
     monkeypatch.setattr(bot, "VERIFY_TOKEN", "secret")
     monkeypatch.setattr(bot, "APP_SECRET", "")
     monkeypatch.setattr(bot, "ALLOWED", {"911"})
@@ -130,3 +132,66 @@ def test_gemini_failure_returns_friendly_message(monkeypatch):
     out = bot.ask_gemini("911", "hi")
     assert "busy" in out
     assert bot.HISTORY["911"] == []
+
+
+def test_history_persists_across_restart(monkeypatch):
+    class R:
+        status_code = 200
+
+        def json(self):
+            return {"candidates": [{"content": {"parts": [{"text": "hello"}]}}]}
+
+    monkeypatch.setattr(bot.requests, "post", lambda *a, **k: R())
+    bot.ask_gemini("911", "hi")
+    bot.HISTORY.clear()  # simulate restart
+    assert [t["role"] for t in bot.load_history("911")] == ["user", "model"]
+    bot.handle_command("911", "/clear")
+    bot.HISTORY.clear()
+    assert bot.load_history("911") == []
+
+
+def test_tasks_persist_in_store():
+    bot.handle_command("911", "/add buy milk")
+    assert bot.load_tasks()["911"][0]["text"] == "buy milk"
+
+
+def test_remind_add_list_remove():
+    out = bot.handle_command("911", "/remind 30m drink water")
+    assert "#1" in out
+    assert "drink water" in bot.handle_command("911", "/reminders")
+    assert "hata" in bot.handle_command("911", "/unremind 1")
+    assert "nahi hai" in bot.handle_command("911", "/reminders")
+    assert "Aise likh" in bot.handle_command("911", "/remind soon")
+    assert "Aise likh" in bot.handle_command("911", "/remind 30m")
+    assert "nahi mila" in bot.handle_command("911", "/unremind 9")
+
+
+def test_tick_sends_only_due_and_requires_key(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda to, text: sent.append((to, text)))
+    bot.save_reminders([
+        {"id": 1, "number": "911", "due": 1.0, "text": "old"},
+        {"id": 2, "number": "911", "due": 9e12, "text": "later"},
+    ])
+    assert client.get("/tick").status_code == 403
+    assert client.get("/tick?key=wrong").status_code == 403
+    r = client.get("/tick", headers={"X-Cron-Key": "cron"})
+    assert r.get_json() == {"sent": 1}
+    assert sent == [("911", "Reminder: old")]
+    assert [x["id"] for x in bot.load_reminders()] == [2]
+    assert client.get("/tick?key=cron").get_json() == {"sent": 0}
+
+
+def test_tick_disabled_without_secret(client, monkeypatch):
+    monkeypatch.setattr(bot, "CRON_SECRET", "")
+    assert client.get("/tick?key=").status_code == 403
+
+
+def test_digest(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(bot, "send", lambda to, text: sent.append((to, text)))
+    assert client.get("/digest?key=cron").get_json() == {"sent": 0}
+    bot.handle_command("911", "/add file form")
+    assert client.get("/digest?key=cron").get_json() == {"sent": 1}
+    assert "file form" in sent[0][1]
+    assert client.get("/digest").status_code == 403
