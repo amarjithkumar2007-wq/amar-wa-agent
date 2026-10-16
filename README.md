@@ -6,16 +6,18 @@ Only numbers listed in `ALLOWED_NUMBERS` get a reply. Everyone else is ignored.
 
 ## What it does today
 
-- Chats with Gemini (keeps the last 20 turns per number, in memory).
+- Chats with Gemini (keeps the last 20 turns per number, saved in the store).
 - Task tracker: `/add <text>`, `/list`, `/done <no>`, `/clear` (clears chat memory), `/help`.
+- Reminders: `/remind 30m text`, `/remind 2h text`, `/remind 18:00 text` (IST), `/remind 2026-10-20 09:00 text`, `/reminders`, `/unremind <no>`.
+- `/tick` (send due reminders) and `/digest` (morning summary): call them from a free cron such as cron-job.org with `?key=CRON_SECRET` or an `X-Cron-Key` header.
 - Webhook verification, optional `X-Hub-Signature-256` check (`META_APP_SECRET`), duplicate message de-dupe.
 - `GET /health` for hosting health checks.
 
 ## Known limits
 
-- Chat history and `tasks.json` live on local disk or memory. On a free host they are lost on restart.
+- Without Upstash configured, data is kept in a local file (`data.json`), which a free host wipes on restart. Set the Upstash variables to keep it.
 - Text messages only. No Gmail, Calendar, browsing or form filling yet.
-- Planned next: persistence + reminders, then tools.
+- Planned next: tools (Gmail/Calendar), RAG memory.
 
 ## Run locally
 
@@ -37,7 +39,10 @@ python app.py
 | `GEMINI_MODEL` | Optional. Default `gemini-2.0-flash`. |
 | `ALLOWED_NUMBERS` | Comma-separated numbers with country code, no `+`. |
 | `META_APP_SECRET` | Optional. Turns on webhook signature checking. |
-| `TASK_FILE` | Optional. Path of the task file. Default `tasks.json`. |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Optional. Free Upstash Redis REST credentials. Turns on persistence. |
+| `CRON_SECRET` | Secret for `/tick` and `/digest`. Without it both return 403. |
+| `TZ_OFFSET_MINUTES` | Optional. Default `330` (IST). |
+| `DATA_FILE` | Optional. Local fallback file. Default `data.json`. |
 
 Never commit secrets. Set them in the host's secret settings.
 
