@@ -1,6 +1,9 @@
 import os, json, time, hmac, hashlib, threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import requests
+
+from reminders import parse_when
+from store import make_store
 from flask import Flask, request, jsonify
 
 app = Flask(__name__)
@@ -22,24 +25,42 @@ SYSTEM = (
     "Never claim you did something you cannot do. You cannot browse or fill forms."
 )
 
-HISTORY = {}   # number -> list of {role, parts}
+CRON_SECRET = os.environ.get("CRON_SECRET", "")  # protects /tick and /digest
+TZ_MINUTES = int(os.environ.get("TZ_OFFSET_MINUTES", "330"))  # IST
+STORE = make_store(os.environ.get("DATA_FILE", "data.json"))
+HISTORY = {}   # number -> list of {role, parts}; backed by STORE
 MAX_TURNS = 20
-TASK_FILE = os.environ.get("TASK_FILE", "tasks.json")  # note: Render free disk is wiped on restart/redeploy
 LOCK = threading.Lock()
 SEEN = set()
 
 
 def load_tasks():
-    try:
-        with open(TASK_FILE) as f:
-            return json.load(f)
-    except Exception:
-        return {}
+    return STORE.get("tasks", {}) or {}
 
 
 def save_tasks(t):
-    with open(TASK_FILE, "w") as f:
-        json.dump(t, f)
+    STORE.set("tasks", t)
+
+
+def load_history(number):
+    if number not in HISTORY:
+        HISTORY[number] = STORE.get("hist:" + number, []) or []
+    return HISTORY[number]
+
+
+def save_history(number):
+    try:
+        STORE.set("hist:" + number, HISTORY.get(number, []))
+    except Exception as e:  # a store outage must not break replies
+        print("history save error", e, flush=True)
+
+
+def load_reminders():
+    return STORE.get("reminders", []) or []
+
+
+def save_reminders(items):
+    STORE.set("reminders", items)
 
 
 def send(to, text):
@@ -54,7 +75,7 @@ def send(to, text):
 
 
 def ask_gemini(number, text):
-    hist = HISTORY.setdefault(number, [])
+    hist = load_history(number)
     hist.append({"role": "user", "parts": [{"text": text}]})
     del hist[:-MAX_TURNS * 2]
     today = datetime.now(timezone.utc).strftime("%A %d %B %Y (UTC)")
@@ -79,6 +100,7 @@ def ask_gemini(number, text):
         hist.pop()
         return "Jawab nahi mil paya, dobara bhej."
     hist.append({"role": "model", "parts": [{"text": reply}]})
+    save_history(number)
     return reply
 
 
@@ -109,10 +131,64 @@ def handle_command(number, text):
                 return "Aise likh: /done 2"
     if low == "/clear":
         HISTORY.pop(number, None)
+        STORE.set("hist:" + number, [])
         return "Chat memory clear kar di."
+    if low.split()[0] == "/remind":
+        return add_reminder(number, t[7:].split())
+    if low in ("/reminders", "/rlist"):
+        mine = [r for r in load_reminders() if r["number"] == number]
+        if not mine:
+            return "Koi reminder nahi hai. /remind 30m kuch kaam"
+        return "\n".join(f"{r['id']}. {fmt_local(r['due'])} - {r['text']}" for r in mine)
+    if low.startswith("/unremind"):
+        try:
+            rid = int(t[9:].strip())
+        except ValueError:
+            return "Aise likh: /unremind 3"
+        with LOCK:
+            items = load_reminders()
+            keep = [r for r in items if not (r["id"] == rid and r["number"] == number)]
+            if len(keep) == len(items):
+                return "Ye reminder nahi mila."
+            save_reminders(keep)
+        return f"Reminder #{rid} hata diya."
     if low in ("/help", "help"):
-        return "Commands: /add <text>, /list, /done <no>, /clear. Baaki kuch bhi pooch, AI jawab dega."
+        return ("Commands: /add <text>, /list, /done <no>, /clear, /remind <30m|2h|1d|18:00|2026-10-20 09:00> <text>, "
+                "/reminders, /unremind <no>. Baaki kuch bhi pooch, AI jawab dega.")
     return None
+
+
+def fmt_local(epoch):
+    tz = timezone(timedelta(minutes=TZ_MINUTES))
+    return datetime.fromtimestamp(epoch, tz).strftime("%d %b %H:%M")
+
+
+def add_reminder(number, tokens):
+    now = datetime.now(timezone.utc)
+    parsed = parse_when(tokens, now, TZ_MINUTES)
+    if not parsed or not parsed[1].strip():
+        return "Aise likh: /remind 30m paani peena ya /remind 18:00 gym ya /remind 2026-10-20 09:00 form"
+    due, text = parsed
+    with LOCK:
+        items = load_reminders()
+        rid = max([r["id"] for r in items], default=0) + 1
+        items.append({"id": rid, "number": number, "due": due.timestamp(), "text": text.strip()})
+        save_reminders(items)
+    return f"Reminder #{rid} set: {fmt_local(due.timestamp())} - {text.strip()}"
+
+
+def authorized():
+    key = request.headers.get("X-Cron-Key") or request.args.get("key", "")
+    return bool(CRON_SECRET) and hmac.compare_digest(key, CRON_SECRET)
+
+
+def due_reminders(now_ts):
+    with LOCK:
+        items = load_reminders()
+        due = [r for r in items if r["due"] <= now_ts]
+        if due:
+            save_reminders([r for r in items if r["due"] > now_ts])
+    return due
 
 
 def process(msg):
@@ -134,6 +210,43 @@ def process(msg):
 @app.get("/health")
 def health():
     return "ok"
+
+
+@app.route("/tick", methods=["GET", "POST"])
+def tick():
+    """Call every few minutes from a free cron (cron-job.org). Sends due reminders."""
+    if not authorized():
+        return "forbidden", 403
+    due = due_reminders(time.time())
+    for r in due:
+        send(r["number"], f"Reminder: {r['text']}")
+    return jsonify(sent=len(due))
+
+
+@app.route("/digest", methods=["GET", "POST"])
+def digest():
+    """Call once a morning from cron. Sends pending tasks and today's reminders."""
+    if not authorized():
+        return "forbidden", 403
+    tasks = load_tasks()
+    items = load_reminders()
+    horizon = time.time() + 24 * 3600
+    sent = 0
+    for number in ALLOWED:
+        pending = [x["text"] for x in tasks.get(number, []) if not x["done"]]
+        today = [r for r in items if r["number"] == number and r["due"] <= horizon]
+        if not pending and not today:
+            continue
+        lines = ["Subah ka digest:"]
+        if pending:
+            lines.append("Pending:")
+            lines += [f"- {p}" for p in pending]
+        if today:
+            lines.append("Aaj ke reminders:")
+            lines += [f"- {fmt_local(r['due'])} {r['text']}" for r in today]
+        send(number, "\n".join(lines))
+        sent += 1
+    return jsonify(sent=sent)
 
 
 @app.get("/webhook")

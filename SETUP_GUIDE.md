@@ -30,4 +30,13 @@ Test number ko WhatsApp pe "hi" bhej. Reply aana chahiye.
 ## Dhyan rakho
 - Temp token 24 ghante mein expire hota hai. Business Settings > System users se permanent token bana (permissions `whatsapp_business_messaging`, `whatsapp_business_management`) aur `WHATSAPP_TOKEN` badal.
 - Render free service idle pe sleep ho jaati hai. Pehla reply 1 min late ho sakta hai.
-- Tasks aur chat memory restart pe chali jaati hain. Persistence agle PR mein aayegi.
+- Tasks, chat memory aur reminders restart pe tabhi bachte hain jab Upstash set ho (neeche).
+
+## Optional - Persistence + reminders (Upstash, free)
+1. upstash.com > Sign in with GitHub > Redis > Create database (Free plan, kisi bhi region). Card nahi chahiye. Agar card maange to ruk jaana.
+2. Database page > REST API: `UPSTASH_REDIS_REST_URL` aur `UPSTASH_REDIS_REST_TOKEN` copy kar aur Render Environment mein daal.
+3. Render Environment mein `CRON_SECRET` bhi daal (koi lamba random text).
+4. cron-job.org (free) pe 2 jobs bana:
+   - Har 5 minute: `https://<naam>.onrender.com/tick?key=<CRON_SECRET>` (due reminders bhejta hai; free Render service ko jagaye bhi rakhta hai).
+   - Roz subah 8:00 IST: `https://<naam>.onrender.com/digest?key=<CRON_SECRET>`.
+5. WhatsApp pe test: `/remind 2m test`.
